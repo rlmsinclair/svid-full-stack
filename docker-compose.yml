@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: svid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-svid}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-svid_password}
+      POSTGRES_DB: ${POSTGRES_DB:-svid}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-svid}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - svid-network
+
+  backend:
+    build:
+      context: ./svid-backend
+      dockerfile: Dockerfile.production
+    container_name: svid-backend
+    restart: unless-stopped
+    env_file:
+      - .env.backend
+    environment:
+      - DATABASE_URL=postgresql://svid:svid_password@postgres:5432/svid
+      - SQLX_OFFLINE=${SQLX_OFFLINE:-false}
+      - BIND_ADDRESS=0.0.0.0:8080
+      - RUST_LOG=info
+      - USE_GPU_ENCODING=false
+      - MAX_PARALLEL_ENCODING_JOBS=2
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backend_uploads:/app/uploads
+    networks:
+      - svid-network
+
+  frontend:
+    build:
+      context: ./svid-frontend
+      dockerfile: Dockerfile.production
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8080
+        - NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY}
+        - NEXT_PUBLIC_WORLDCOIN_APP_ID=${NEXT_PUBLIC_WORLDCOIN_APP_ID}
+        - INTERNAL_API_URL=http://backend:8080
+    container_name: svid-frontend
+    restart: unless-stopped
+    env_file:
+      - .env.frontend
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - INTERNAL_API_URL=http://backend:8080
+      - DOCKER_ENV=true
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - svid-network
+
+  discord-bot:
+    build:
+      context: ./svid-discord-bot
+      dockerfile: Dockerfile
+    container_name: svid-discord-bot
+    restart: unless-stopped
+    env_file:
+      - .env.discord
+    environment:
+      - NODE_ENV=production
+      - SVID_API_URL=http://backend:8080
+      - MAX_SEARCH_RESULTS=${MAX_SEARCH_RESULTS:-10}
+      - ENABLE_AI_FEATURES=${ENABLE_AI_FEATURES:-true}
+      - MONTAGE_MAX_SEGMENTS=${MONTAGE_MAX_SEGMENTS:-5}
+    depends_on:
+      - backend
+    networks:
+      - svid-network
+
+networks:
+  svid-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  backend_uploads:

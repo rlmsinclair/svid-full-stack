@@ -1,0 +1,18 @@
+[submodule "pipelines"]
+	path = pipelines
+	url = https://github.com/rlmsinclair/pipelines.git
+[submodule "open-webui"]
+	path = open-webui
+	url = https://github.com/rlmsinclair/open-webui.git
+[submodule "stable-diffusion-webui"]
+	path = stable-diffusion-webui
+	url = https://github.com/AUTOMATIC1111/stable-diffusion-webui.git
+[submodule "svid-backend"]
+	path = svid-backend
+	url = https://github.com/SvidAI/svid-backend
+[submodule "svid-frontend"]
+	path = svid-frontend
+	url = https://github.com/SvidAI/svid-frontend
+[submodule "svid-discord-bot"]
+	path = svid-discord-bot
+	url = https://github.com/SvidAI/svid-discord.git

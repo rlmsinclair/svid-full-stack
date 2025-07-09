@@ -1,0 +1,45 @@
+{
+  "version": "1.0.0",
+  "project": "pixr",
+  "workflows": {
+    "issue_processing": {
+      "strategy": "hierarchical",
+      "max_parallel": 10,
+      "priority_order": ["urgent", "high", "medium", "low"],
+      "auto_commit": true,
+      "branch_naming": "claude-swarm-{issue_id}"
+    },
+    "code_review": {
+      "auto_fix": true,
+      "fix_order": ["security", "types", "lint", "tests"],
+      "require_tests": true
+    },
+    "optimization": {
+      "targets": ["performance", "memory", "bundle_size"],
+      "benchmark_before": true,
+      "benchmark_after": true
+    }
+  },
+  "memory_keys": {
+    "issues": "linear_issues_queue",
+    "architecture": "system_architecture",
+    "progress": "sparc_session_progress",
+    "analysis": "efficiency_analysis"
+  },
+  "automation": {
+    "daily_standup": "0 9 * * *",
+    "weekly_analysis": "0 9 * * 1",
+    "issue_sync": "*/30 * * * *"
+  },
+  "sparc_preferences": {
+    "default_mode": "orchestrator",
+    "fallback_modes": ["coder", "researcher"],
+    "memory_coordination": true
+  },
+  "quality_gates": {
+    "min_test_coverage": 80,
+    "max_complexity": 15,
+    "lint_errors_allowed": 0,
+    "type_errors_allowed": 0
+  }
+}

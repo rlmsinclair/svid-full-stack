@@ -1,0 +1,74 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+.venv
+dist/
+build/
+*.egg-info/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Video files
+*.mov
+*.mp4
+*.avi
+
+# Custom ignores
+data/**
+videos/**
+.cursor/ignore/
+St
+stable-diffusion-webui/models
+pipelines/.env
+stable-diffusion-webui/.env
+open-webui/.env
+
+# Memory backups
+memory/backups/
+
+# Local development
+.roomodes
+.coverage
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+
+# Docker
+all_images.tar
+images.tar

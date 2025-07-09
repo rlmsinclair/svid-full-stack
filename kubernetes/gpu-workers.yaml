@@ -1,0 +1,555 @@
+---
+# GPU Worker Node Configuration for SVID Video Processing
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-processing
+  labels:
+    name: gpu-processing
+    monitoring: enabled
+
+---
+# ConfigMap for GPU processor configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-processor-config
+  namespace: gpu-processing
+data:
+  processor.yaml: |
+    model_path: /models/llama-4-scout-17b-int8.safetensors
+    batch_size: 32
+    max_frames_per_video: 300
+    gpu_memory_fraction: 0.9
+    num_inference_threads: 4
+    enable_int8_quantization: true
+    kv_cache_size: 4096
+    
+    # Redis configuration for job queue
+    redis:
+      host: redis-service.gpu-processing.svc.cluster.local
+      port: 6379
+      db: 0
+      pool_size: 50
+    
+    # Monitoring
+    metrics:
+      enabled: true
+      port: 9090
+      path: /metrics
+
+---
+# PersistentVolume for model storage
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-storage-pv
+  namespace: gpu-processing
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast-ssd
+  hostPath:
+    path: /models
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: node-type
+              operator: In
+              values:
+                - gpu-node
+
+---
+# PersistentVolumeClaim for model storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage-pvc
+  namespace: gpu-processing
+spec:
+  accessModes:
+    - ReadOnlyMany
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# GPU Time-slicing Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: time-slicing-config
+  namespace: gpu-processing
+data:
+  any: |
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4
+
+---
+# Primary GPU Processing Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-processor-primary
+  namespace: gpu-processing
+  labels:
+    app: gpu-processor
+    tier: primary
+spec:
+  replicas: 4  # 4 primary processing nodes
+  selector:
+    matchLabels:
+      app: gpu-processor
+      tier: primary
+  template:
+    metadata:
+      labels:
+        app: gpu-processor
+        tier: primary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        node-type: gpu-node
+        gpu-type: rtx-4090
+        gpu-count: "4"
+      
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      
+      # Init container to verify GPU availability
+      initContainers:
+        - name: gpu-check
+          image: nvidia/cuda:12.3.0-base-ubuntu22.04
+          command: ["nvidia-smi"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+      
+      containers:
+        - name: gpu-processor
+          image: svid/gpu-processor:latest
+          imagePullPolicy: Always
+          
+          env:
+            - name: RUST_LOG
+              value: "info,gpu_processor=debug"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility,video"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3"
+          
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+              readOnly: true
+            - name: config
+              mountPath: /etc/gpu-processor
+            - name: video-cache
+              mountPath: /tmp/video-cache
+            - name: dshm
+              mountPath: /dev/shm
+          
+          resources:
+            requests:
+              memory: "240Gi"
+              cpu: "32"
+              nvidia.com/gpu: 4
+              ephemeral-storage: "100Gi"
+            limits:
+              memory: "256Gi"
+              cpu: "64"
+              nvidia.com/gpu: 4
+              ephemeral-storage: "200Gi"
+          
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"]
+      
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: model-storage-pvc
+        - name: config
+          configMap:
+            name: gpu-processor-config
+        - name: video-cache
+          emptyDir:
+            sizeLimit: 100Gi
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+
+---
+# Inference Node Deployment (lighter weight)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-processor-inference
+  namespace: gpu-processing
+  labels:
+    app: gpu-processor
+    tier: inference
+spec:
+  replicas: 8  # 8 inference nodes
+  selector:
+    matchLabels:
+      app: gpu-processor
+      tier: inference
+  template:
+    metadata:
+      labels:
+        app: gpu-processor
+        tier: inference
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      nodeSelector:
+        node-type: gpu-node
+        gpu-type: rtx-4090
+        gpu-count: "2"
+      
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      
+      containers:
+        - name: gpu-processor
+          image: svid/gpu-processor:latest
+          imagePullPolicy: Always
+          
+          env:
+            - name: PROCESSOR_MODE
+              value: "inference"
+            - name: RUST_LOG
+              value: "info"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1"
+          
+          ports:
+            - name: metrics
+              containerPort: 9090
+            - name: grpc
+              containerPort: 50051
+          
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+              readOnly: true
+            - name: config
+              mountPath: /etc/gpu-processor
+            - name: dshm
+              mountPath: /dev/shm
+          
+          resources:
+            requests:
+              memory: "120Gi"
+              cpu: "8"
+              nvidia.com/gpu: 2
+            limits:
+              memory: "128Gi"
+              cpu: "16"
+              nvidia.com/gpu: 2
+          
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: metrics
+            initialDelaySeconds: 45
+            periodSeconds: 20
+          
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: model-storage-pvc
+        - name: config
+          configMap:
+            name: gpu-processor-config
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+---
+# Service for GPU processors
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-processor-service
+  namespace: gpu-processing
+  labels:
+    app: gpu-processor
+spec:
+  selector:
+    app: gpu-processor
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+
+---
+# HorizontalPodAutoscaler for inference nodes
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gpu-processor-inference-hpa
+  namespace: gpu-processing
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gpu-processor-inference
+  minReplicas: 4
+  maxReplicas: 16
+  metrics:
+    - type: Resource
+      resource:
+        name: nvidia.com/gpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: gpu_memory_utilization
+        target:
+          type: AverageValue
+          averageValue: "80"
+    - type: Object
+      object:
+        metric:
+          name: video_processing_queue_depth
+        describedObject:
+          apiVersion: v1
+          kind: Service
+          name: redis-service
+        target:
+          type: Value
+          value: "1000"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+
+---
+# PodDisruptionBudget for high availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gpu-processor-pdb
+  namespace: gpu-processing
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: gpu-processor
+      tier: primary
+
+---
+# Redis for job queue (StatefulSet for persistence)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: gpu-processing
+spec:
+  serviceName: redis-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "16Gi"
+              cpu: "4"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+          command:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - "30gb"
+            - --maxmemory-policy
+            - "allkeys-lru"
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 100Gi
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: gpu-processing
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  clusterIP: None
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gpu-processor-monitor
+  namespace: gpu-processing
+  labels:
+    app: gpu-processor
+spec:
+  selector:
+    matchLabels:
+      app: gpu-processor
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+
+---
+# NetworkPolicy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gpu-processor-network-policy
+  namespace: gpu-processing
+spec:
+  podSelector:
+    matchLabels:
+      app: gpu-processor
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: svid-backend
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 50051
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443  # For model downloads
+        - protocol: TCP
+          port: 53   # DNS
+        - protocol: UDP
+          port: 53   # DNS
